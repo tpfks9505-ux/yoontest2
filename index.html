@@ -151,6 +151,16 @@
 </head>
 <body>
 
+<div id="lockOverlay" style="position:fixed;inset:0;background:#0A1120;z-index:9999;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px;font-family:'Noto Sans KR',sans-serif;">
+  <div style="font-size:20px;font-weight:900;color:#E7ECF5;">내 주식 시세판</div>
+  <div style="font-size:13px;color:#8592AD;">비밀번호를 입력하세요</div>
+  <div style="display:flex;gap:8px;">
+    <input type="password" id="lockPw" autocomplete="off" style="background:#121B2E;border:1px solid #24314C;border-radius:6px;padding:10px 12px;color:#E7ECF5;font-size:14px;font-family:inherit;" placeholder="비밀번호">
+    <button id="lockBtn" style="background:#E8B84B;color:#20180a;border:none;border-radius:6px;padding:10px 16px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:inherit;">확인</button>
+  </div>
+  <div id="lockMsg" style="color:#E24C4C;font-size:12.5px;height:16px;"></div>
+</div>
+
 <div class="tape-wrap"><div class="tape" id="tape"></div></div>
 
 <header class="top">
@@ -296,25 +306,128 @@
 <script>
 (function(){
 
-  // ---------------- persistence: Claude artifact storage OR localStorage fallback ----------------
+  // ================= 비밀번호 잠금 =================
+  // 주의: 이 페이지 소스는 누구나 볼 수 있으므로 아래 비밀번호도 "그대로" 노출됩니다.
+  // 진짜 보안이 아니라 우연히 들어온 사람을 막는 정도의 가벼운 잠금입니다.
+  (function initLock(){
+    const APP_PASSWORD = 'test6645';
+    const AUTH_KEY = 'stockManagerAuthed_v1';
+    const overlay = document.getElementById('lockOverlay');
+    if(!overlay) return;
+    if(sessionStorage.getItem(AUTH_KEY) === '1'){ overlay.remove(); return; }
+    const pwInput = document.getElementById('lockPw');
+    const btn = document.getElementById('lockBtn');
+    const msg = document.getElementById('lockMsg');
+    function tryUnlock(){
+      if(pwInput.value === APP_PASSWORD){
+        sessionStorage.setItem(AUTH_KEY, '1');
+        overlay.remove();
+      }else{
+        msg.textContent = '비밀번호가 올바르지 않습니다.';
+        pwInput.value=''; pwInput.focus();
+      }
+    }
+    btn.addEventListener('click', tryUnlock);
+    pwInput.addEventListener('keydown', e => { if(e.key === 'Enter'){ e.preventDefault(); tryUnlock(); } });
+    pwInput.focus();
+  })();
+
+  // ---------------- persistence ----------------
+  // Claude 미리보기 안에서는 window.storage(계정별 저장)를 그대로 사용하고,
+  // GitHub Pages 등 실제 배포 환경에서는 jsonblob.com에 만든 공유 저장소 하나를
+  // 모든 브라우저/기기가 함께 읽고 쓰도록 합니다. (localStorage는 오프라인 캐시 겸 최후 폴백)
   const hasClaudeStorage = (typeof window.storage !== 'undefined' && window.storage && typeof window.storage.get === 'function');
 
-  async function loadJSON(key, fallback){
-    try{
-      if(hasClaudeStorage){
-        const res = await window.storage.get(key, false);
-        return res ? JSON.parse(res.value) : fallback;
-      }else{
-        const raw = localStorage.getItem(key);
-        return raw ? JSON.parse(raw) : fallback;
-      }
-    }catch(e){ return fallback; }
+  // ↓↓↓ 최초 1회 설정한 뒤에는 비워두지 마세요. 설정 방법은 화면에 뜨는 안내 배너를 참고하세요. ↓↓↓
+  const SHARED_BLOB_ID = '';
+
+  const LOCAL_CACHE_KEY = 'stockManagerState_v1';
+  function readLocalCache(){
+    try{ const raw = localStorage.getItem(LOCAL_CACHE_KEY); return raw ? JSON.parse(raw) : null; }catch(e){ return null; }
   }
-  async function saveJSON(key, val){
+  function writeLocalCache(state){
+    try{ localStorage.setItem(LOCAL_CACHE_KEY, JSON.stringify(state)); }catch(e){}
+  }
+
+  async function loadState(){
+    if(hasClaudeStorage){
+      const [h, w, f] = await Promise.all([
+        window.storage.get('holdings', false).catch(()=>null),
+        window.storage.get('watchlist', false).catch(()=>null),
+        window.storage.get('fxRecords', false).catch(()=>null),
+      ]);
+      return {
+        holdings: h ? JSON.parse(h.value) : [],
+        watchlist: w ? JSON.parse(w.value) : {},
+        fxRecords: f ? JSON.parse(f.value) : [],
+      };
+    }
+    if(SHARED_BLOB_ID){
+      try{
+        const resp = await fetch(`https://jsonblob.com/api/jsonBlob/${SHARED_BLOB_ID}`, { headers:{ 'Accept':'application/json' } });
+        if(!resp.ok) throw new Error('공유 저장소 읽기 실패');
+        const data = await resp.json();
+        const state = { holdings: data.holdings||[], watchlist: data.watchlist||{}, fxRecords: data.fxRecords||[] };
+        writeLocalCache(state);
+        return state;
+      }catch(e){
+        return readLocalCache() || { holdings:[], watchlist:{}, fxRecords:[] };
+      }
+    }
+    return readLocalCache() || { holdings:[], watchlist:{}, fxRecords:[] };
+  }
+
+  let sharedStoreSetupShown = false;
+  async function maybeCreateSharedStore(state){
+    if(sharedStoreSetupShown) return;
+    sharedStoreSetupShown = true;
     try{
-      if(hasClaudeStorage){ await window.storage.set(key, JSON.stringify(val), false); }
-      else{ localStorage.setItem(key, JSON.stringify(val)); }
-    }catch(e){ console.error('save failed', key, e); }
+      const resp = await fetch('https://jsonblob.com/api/jsonBlob', {
+        method:'POST',
+        headers:{ 'Content-Type':'application/json' },
+        body: JSON.stringify(state)
+      });
+      const loc = resp.headers.get('Location') || '';
+      const id = loc.split('/').filter(Boolean).pop();
+      if(id) showSyncSetupBanner(id);
+    }catch(e){ /* 조용히 무시: 이 브라우저에는 계속 로컬로 저장됨 */ }
+  }
+
+  function showSyncSetupBanner(id){
+    if(document.getElementById('syncSetupBanner')) return;
+    const banner = document.createElement('div');
+    banner.id = 'syncSetupBanner';
+    banner.className = 'msg info';
+    banner.style.margin = '14px 20px 0';
+    banner.innerHTML = `여러 브라우저·기기에서 같은 데이터를 보려면, index.html의 <code>const SHARED_BLOB_ID = '';</code> 부분을 아래 ID로 바꾸고 다시 커밋하세요:<br><b style="user-select:all;">${id}</b><br>그 전까지 지금 이 브라우저에는 계속 로컬로 저장됩니다.`;
+    const header = document.querySelector('header.top');
+    if(header) header.after(banner);
+  }
+
+  async function saveState(){
+    const state = { holdings, watchlist, fxRecords };
+    writeLocalCache(state);
+    if(hasClaudeStorage){
+      try{
+        await Promise.all([
+          window.storage.set('holdings', JSON.stringify(holdings), false),
+          window.storage.set('watchlist', JSON.stringify(watchlist), false),
+          window.storage.set('fxRecords', JSON.stringify(fxRecords), false),
+        ]);
+      }catch(e){ console.error('save failed', e); }
+      return;
+    }
+    if(SHARED_BLOB_ID){
+      try{
+        await fetch(`https://jsonblob.com/api/jsonBlob/${SHARED_BLOB_ID}`, {
+          method:'PUT',
+          headers:{ 'Content-Type':'application/json' },
+          body: JSON.stringify(state)
+        });
+      }catch(e){ console.error('공유 저장소 저장 실패', e); }
+      return;
+    }
+    await maybeCreateSharedStore(state);
   }
 
   let holdings = [];
@@ -324,32 +437,52 @@
   let activeSymbol = null;
 
   // ---------------- network ----------------
+  // 프록시들을 순서대로 하나씩 시도(실패 시 다음 것 대기)하면 최대 4번 타임아웃을 다 채워야 해서 느려짐.
+  // 대신 전부 동시에 요청을 보내고 "가장 먼저 성공하는 응답"만 사용(Promise.any)해서 체감 속도를 크게 줄임.
   const PROXIES = [
     { build: u => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`, unwrap: t => t },
     { build: u => `https://corsproxy.io/?url=${encodeURIComponent(u)}`, unwrap: t => t },
     { build: u => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`, unwrap: t => t },
     { build: u => `https://api.allorigins.win/get?url=${encodeURIComponent(u)}`, unwrap: t => { try{ return JSON.parse(t).contents; }catch(e){ return t; } } },
   ];
-  async function fetchRaw(url, timeoutMs=9000){
-    let lastErr = null;
-    for(const proxy of PROXIES){
+  // 바이트 단위(인코딩 보존)로 받아야 하는 경우엔 JSON으로 다시 감싸는 마지막 프록시는 제외
+  // (그 프록시는 원문을 자기 서버에서 이미 문자열로 재해석하므로 EUC-KR 등 원본 인코딩이 깨질 수 있음)
+  const BYTE_PROXIES = PROXIES.slice(0, 3);
+
+  async function raceProxies(url, proxies, timeoutMs, run){
+    const attempts = proxies.map(proxy => (async () => {
+      const ctrl = new AbortController();
+      const t = setTimeout(()=>ctrl.abort(), timeoutMs);
       try{
-        const ctrl = new AbortController();
-        const t = setTimeout(()=>ctrl.abort(), timeoutMs);
         const resp = await fetch(proxy.build(url), {signal: ctrl.signal});
         clearTimeout(t);
         if(!resp.ok) throw new Error('HTTP '+resp.status);
-        const raw = await resp.text();
-        const out = proxy.unwrap(raw);
-        if(!out) throw new Error('empty body');
-        return out;
-      }catch(e){ lastErr = e; }
+        const result = await run(resp, proxy);
+        if(result == null || (typeof result === 'string' && result.length === 0)) throw new Error('empty body');
+        return result;
+      }catch(e){ clearTimeout(t); throw e; }
+    })());
+    try{
+      return await Promise.any(attempts);
+    }catch(aggErr){
+      const first = (aggErr && aggErr.errors && aggErr.errors[0]) || null;
+      throw first || new Error('네트워크 오류');
     }
-    throw lastErr || new Error('네트워크 오류');
   }
-  async function fetchJSON(url, timeoutMs=9000){
+
+  async function fetchRaw(url, timeoutMs=7000){
+    return raceProxies(url, PROXIES, timeoutMs, async (resp, proxy) => {
+      const raw = await resp.text();
+      return proxy.unwrap(raw);
+    });
+  }
+  async function fetchJSON(url, timeoutMs=7000){
     const text = await fetchRaw(url, timeoutMs);
     return JSON.parse(text);
+  }
+  // HTML 페이지를 원본 인코딩(EUC-KR) 그대로 디코딩하기 위해 바이트로 받아옴
+  async function fetchRawBytes(url, timeoutMs=7000){
+    return raceProxies(url, BYTE_PROXIES, timeoutMs, async (resp) => await resp.arrayBuffer());
   }
 
   function parseKRNum(s){
@@ -439,7 +572,12 @@
 
   async function getMarketCapRankingViaHtml(sosok, limit=20){
     const url = `https://finance.naver.com/sise/sise_market_sum.naver?sosok=${sosok}&page=1`;
-    const html = await fetchRaw(url);
+    const buf = await fetchRawBytes(url);
+    // finance.naver.com 페이지는 EUC-KR로 서비스됨. 프록시를 거치며 브라우저가 기본값(UTF-8)으로
+    // 잘못 해석해 종목명이 깨져 보이던 문제를 바이트 단위로 받아 EUC-KR로 직접 디코딩해 해결.
+    let html;
+    try{ html = new TextDecoder('euc-kr').decode(buf); }
+    catch(e){ html = new TextDecoder('utf-8').decode(buf); }
     const rowChunks = html.split(/<tr[^>]*>/).slice(1);
     const results = [];
     for(const chunk of rowChunks){
@@ -555,7 +693,7 @@
 
     const newHolding = { id: Date.now().toString(36), code: target.code, name: target.name, qty, buyPrice };
     holdings.push(newHolding);
-    await saveJSON('holdings', holdings);
+    await saveState();
     renderHoldings();
 
     addMsg.innerHTML = `<div class="msg info"><span class="spinner"></span>현재가를 불러오는 중...</div>`;
@@ -599,7 +737,7 @@
     body.querySelectorAll('.row-del').forEach(el => {
       el.addEventListener('click', async () => {
         holdings = holdings.filter(h => h.id !== el.dataset.id);
-        await saveJSON('holdings', holdings);
+        await saveState();
         renderHoldings(); renderSummary(); renderTape();
       });
     });
@@ -701,7 +839,7 @@
     entry.lastFetched = new Date().toISOString();
 
     watchlist[code] = entry;
-    await saveJSON('watchlist', watchlist);
+    await saveState();
     activeSymbol = code;
     renderWatchlist();
     renderDetail(code);
@@ -750,7 +888,7 @@
         e.stopPropagation();
         const code = el.dataset.del;
         delete watchlist[code];
-        await saveJSON('watchlist', watchlist);
+        await saveState();
         if(activeSymbol === code){ activeSymbol = null; document.getElementById('lookupResult').innerHTML = ''; }
         renderWatchlist();
       });
@@ -928,7 +1066,7 @@
       body.querySelectorAll('.row-del').forEach(el => {
         el.addEventListener('click', async () => {
           fxRecords = fxRecords.filter(r => r.id !== el.dataset.id);
-          await saveJSON('fxRecords', fxRecords);
+          await saveState();
           renderFx();
         });
       });
@@ -965,7 +1103,7 @@
     }
     const krwAmount = foreignAmount * rate;
     fxRecords.push({ id: Date.now().toString(36), currency, foreignAmount, rate, krwAmount, date });
-    await saveJSON('fxRecords', fxRecords);
+    await saveState();
     msgEl.innerHTML = '';
     document.getElementById('fxAmount').value=''; document.getElementById('fxRate').value='';
     renderFx();
@@ -993,9 +1131,10 @@
       document.querySelector('header.top').after(banner);
     }
 
-    holdings = await loadJSON('holdings', []);
-    watchlist = await loadJSON('watchlist', {});
-    fxRecords = await loadJSON('fxRecords', []);
+    const initialState = await loadState();
+    holdings = initialState.holdings;
+    watchlist = initialState.watchlist;
+    fxRecords = initialState.fxRecords;
 
     renderHoldings(); renderSummary(); renderTape(); renderWatchlist(); renderFx();
 
