@@ -310,7 +310,7 @@
   // 주의: 이 페이지 소스는 누구나 볼 수 있으므로 아래 비밀번호도 "그대로" 노출됩니다.
   // 진짜 보안이 아니라 우연히 들어온 사람을 막는 정도의 가벼운 잠금입니다.
   (function initLock(){
-    const APP_PASSWORD = 'test66112';
+    const APP_PASSWORD = 'test6645';
     const AUTH_KEY = 'stockManagerAuthed_v1';
     const overlay = document.getElementById('lockOverlay');
     if(!overlay) return;
@@ -365,41 +365,54 @@
     if(SHARED_BLOB_ID){
       try{
         const resp = await fetch(`https://jsonblob.com/api/jsonBlob/${SHARED_BLOB_ID}`, { headers:{ 'Accept':'application/json' } });
-        if(!resp.ok) throw new Error('공유 저장소 읽기 실패');
+        if(!resp.ok) throw new Error('HTTP ' + resp.status);
         const data = await resp.json();
         const state = { holdings: data.holdings||[], watchlist: data.watchlist||{}, fxRecords: data.fxRecords||[] };
         writeLocalCache(state);
         return state;
       }catch(e){
+        console.error('공유 저장소 읽기 실패', e);
+        showSyncBanner('error', '공유 저장소 읽기 실패: ' + String(e && e.message || e));
         return readLocalCache() || { holdings:[], watchlist:{}, fxRecords:[] };
       }
     }
     return readLocalCache() || { holdings:[], watchlist:{}, fxRecords:[] };
   }
 
-  let sharedStoreSetupShown = false;
-  async function maybeCreateSharedStore(state){
-    if(sharedStoreSetupShown) return;
-    sharedStoreSetupShown = true;
+  let sharedStoreBootstrapped = false;
+  async function bootstrapSharedStore(){
+    if(hasClaudeStorage || SHARED_BLOB_ID || sharedStoreBootstrapped) return;
+    sharedStoreBootstrapped = true;
+    const localState = readLocalCache() || { holdings:[], watchlist:{}, fxRecords:[] };
     try{
       const resp = await fetch('https://jsonblob.com/api/jsonBlob', {
         method:'POST',
-        headers:{ 'Content-Type':'application/json' },
-        body: JSON.stringify(state)
+        headers:{ 'Content-Type':'application/json', 'Accept':'application/json' },
+        body: JSON.stringify(localState)
       });
+      if(!resp.ok) throw new Error('생성 요청이 실패했습니다 (HTTP ' + resp.status + ')');
       const loc = resp.headers.get('Location') || '';
       const id = loc.split('/').filter(Boolean).pop();
-      if(id) showSyncSetupBanner(id);
-    }catch(e){ /* 조용히 무시: 이 브라우저에는 계속 로컬로 저장됨 */ }
+      if(!id) throw new Error('응답에서 저장소 ID를 찾지 못했습니다.');
+      showSyncBanner('ok', id);
+    }catch(e){
+      console.error('공유 저장소 생성 실패:', e);
+      showSyncBanner('error', String(e && e.message || e));
+    }
   }
 
-  function showSyncSetupBanner(id){
+  function showSyncBanner(kind, payload){
     if(document.getElementById('syncSetupBanner')) return;
     const banner = document.createElement('div');
     banner.id = 'syncSetupBanner';
-    banner.className = 'msg info';
     banner.style.margin = '14px 20px 0';
-    banner.innerHTML = `여러 브라우저·기기에서 같은 데이터를 보려면, index.html의 <code>const SHARED_BLOB_ID = '';</code> 부분을 아래 ID로 바꾸고 다시 커밋하세요:<br><b style="user-select:all;">${id}</b><br>그 전까지 지금 이 브라우저에는 계속 로컬로 저장됩니다.`;
+    if(kind === 'ok'){
+      banner.className = 'msg info';
+      banner.innerHTML = `여러 브라우저·기기에서 같은 데이터를 보려면, index.html의 <code>const SHARED_BLOB_ID = '';</code> 부분을 아래 ID로 바꾸고 다시 커밋하세요:<br><b style="user-select:all;">${payload}</b><br>그 전까지 지금 이 브라우저에는 계속 로컬로 저장됩니다.`;
+    }else{
+      banner.className = 'msg error';
+      banner.innerHTML = `공유 저장소 자동 생성에 실패했습니다 (${escapeHtml(payload)}). 지금은 이 브라우저에만 데이터가 저장됩니다. 브라우저 개발자도구(F12) → Console/Network 탭에 뜨는 에러 메시지를 확인해 알려주세요.`;
+    }
     const header = document.querySelector('header.top');
     if(header) header.after(banner);
   }
@@ -419,15 +432,19 @@
     }
     if(SHARED_BLOB_ID){
       try{
-        await fetch(`https://jsonblob.com/api/jsonBlob/${SHARED_BLOB_ID}`, {
+        const resp = await fetch(`https://jsonblob.com/api/jsonBlob/${SHARED_BLOB_ID}`, {
           method:'PUT',
           headers:{ 'Content-Type':'application/json' },
           body: JSON.stringify(state)
         });
-      }catch(e){ console.error('공유 저장소 저장 실패', e); }
+        if(!resp.ok) throw new Error('HTTP ' + resp.status);
+      }catch(e){
+        console.error('공유 저장소 저장 실패', e);
+        showSyncBanner('error', '데이터 동기화 저장 실패: ' + String(e && e.message || e));
+      }
       return;
     }
-    await maybeCreateSharedStore(state);
+    await bootstrapSharedStore();
   }
 
   let holdings = [];
@@ -1135,6 +1152,8 @@
     holdings = initialState.holdings;
     watchlist = initialState.watchlist;
     fxRecords = initialState.fxRecords;
+
+    bootstrapSharedStore(); // 데이터 추가 여부와 상관없이 접속하자마자 공유 저장소를 만들어 안내 배너를 띄움
 
     renderHoldings(); renderSummary(); renderTape(); renderWatchlist(); renderFx();
 
