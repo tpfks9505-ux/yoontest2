@@ -161,10 +161,31 @@
   <div id="lockMsg" style="color:#E24C4C;font-size:12.5px;height:16px;"></div>
 </div>
 
+<div id="settingsOverlay" style="position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9998;display:none;align-items:center;justify-content:center;">
+  <div style="background:#121B2E;border:1px solid #24314C;border-radius:10px;padding:22px;max-width:420px;width:90%;font-family:'Noto Sans KR',sans-serif;">
+    <div style="font-size:15px;font-weight:700;color:#E7ECF5;margin-bottom:8px;">여러 기기 동기화 설정</div>
+    <div style="font-size:12.5px;color:#8592AD;line-height:1.6;margin-bottom:14px;">
+      GitHub Fine-grained 개인 액세스 토큰을 이 브라우저에만 저장합니다. 소스 코드에는 저장되지 않으므로 커밋해도 노출되지 않습니다. 다른 기기에서도 동기화하려면 그 기기에서도 각각 한 번씩 입력해주세요.
+    </div>
+    <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:10px;">
+      <label style="font-size:11px;color:#8592AD;">GitHub Personal Access Token (Fine-grained, Contents: Read/Write)</label>
+      <input type="password" id="settingsTokenInput" autocomplete="off" placeholder="github_pat_..." style="background:#0A1120;border:1px solid #24314C;border-radius:6px;padding:9px 10px;color:#E7ECF5;font-size:13px;font-family:'Roboto Mono',monospace;">
+    </div>
+    <div id="settingsMsg" style="font-size:12px;color:#ff9d9d;min-height:16px;margin-bottom:8px;"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;">
+      <button type="button" class="btn btn-ghost btn-sm" id="settingsClearBtn">토큰 삭제</button>
+      <button type="button" class="btn btn-ghost btn-sm" id="settingsCancelBtn">취소</button>
+      <button type="button" class="btn btn-amber btn-sm" id="settingsSaveBtn">저장</button>
+    </div>
+  </div>
+</div>
+
 <div class="tape-wrap"><div class="tape" id="tape"></div></div>
 
 <header class="top">
-  <h1><span class="led"></span>내 주식 시세판</h1>
+  <h1><span class="led"></span>내 주식 시세판
+    <button id="settingsBtn" class="btn btn-ghost btn-sm" style="margin-left:auto;font-weight:500;">⚙ 동기화 설정</button>
+  </h1>
   <p>네이버 증권 시세를 기반으로 보유 종목 수익률, 종목 업종/체결 최고·최저가, 코스피·코스닥 상위 종목, 환전 이력을 관리하세요.</p>
 </header>
 
@@ -332,6 +353,39 @@
     pwInput.focus();
   })();
 
+  // ---------------- 동기화 설정 (GitHub 토큰, 이 브라우저 전용) ----------------
+  (function initSettingsModal(){
+    const overlay = document.getElementById('settingsOverlay');
+    const openBtn = document.getElementById('settingsBtn');
+    const input = document.getElementById('settingsTokenInput');
+    const msg = document.getElementById('settingsMsg');
+    const saveBtn = document.getElementById('settingsSaveBtn');
+    const cancelBtn = document.getElementById('settingsCancelBtn');
+    const clearBtn = document.getElementById('settingsClearBtn');
+    function open(){
+      input.value = '';
+      msg.textContent = '';
+      overlay.style.display = 'flex';
+      input.focus();
+    }
+    function close(){ overlay.style.display = 'none'; }
+    openBtn.addEventListener('click', open);
+    cancelBtn.addEventListener('click', close);
+    overlay.addEventListener('click', e => { if(e.target === overlay) close(); });
+    saveBtn.addEventListener('click', () => {
+      const val = input.value.trim();
+      if(!val){ msg.textContent = '토큰을 입력해주세요.'; return; }
+      setGithubToken(val);
+      close();
+      location.reload();
+    });
+    clearBtn.addEventListener('click', () => {
+      setGithubToken('');
+      close();
+      location.reload();
+    });
+  })();
+
   // ---------------- persistence ----------------
   // Claude 미리보기 안에서는 window.storage(계정별 저장)를 그대로 사용합니다.
   // GitHub Pages 등 실제 배포 환경에서는 jsonblob.com 같은 외부 무료 서비스가 브라우저 CORS를
@@ -339,15 +393,25 @@
   // GitHub REST API는 브라우저 CORS를 공식 지원하므로 프록시 없이 바로 호출 가능합니다.
   const hasClaudeStorage = (typeof window.storage !== 'undefined' && window.storage && typeof window.storage.get === 'function');
 
-  // ↓↓↓ 아래 4개를 본인 값으로 채우세요 ↓↓↓
+  // 저장소 정보는 코드에 남아있어도 안전합니다 (비밀 아님). 계정명/저장소명일 뿐입니다.
   const GITHUB_OWNER = 'tpfks9505-ux';      // GitHub 계정명
   const GITHUB_REPO = 'yoontest2';          // 저장소 이름
   const GITHUB_BRANCH = 'main';             // 브랜치명 (보통 main)
-  // Settings → Developer settings → Personal access tokens → Fine-grained tokens 에서
-  // "이 저장소(yoontest2)"만 선택하고 Repository permissions → Contents: Read and write 권한만 준
-  // 토큰을 만들어 여기에 붙여넣으세요. (다른 저장소/계정 설정에는 접근 못 하도록 반드시 이 저장소로 한정)
-  const GITHUB_TOKEN = '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';
   const GITHUB_DATA_PATH = 'data/store.json';
+
+  // 토큰은 절대 여기(소스 코드)에 직접 넣지 마세요. Secret scanning에 걸리고, 커밋되면
+  // 공개 저장소에서는 누구나 볼 수 있습니다. 대신 헤더의 "⚙ 동기화 설정" 버튼으로
+  // 각 브라우저의 localStorage에만 저장합니다 (이 기기 전용, 커밋되지 않음).
+  const GITHUB_TOKEN_KEY = 'stockManagerGithubToken_v1';
+  function getGithubToken(){
+    try{ return localStorage.getItem(GITHUB_TOKEN_KEY) || ''; }catch(e){ return ''; }
+  }
+  function setGithubToken(token){
+    try{
+      if(token){ localStorage.setItem(GITHUB_TOKEN_KEY, token); }
+      else{ localStorage.removeItem(GITHUB_TOKEN_KEY); }
+    }catch(e){}
+  }
 
   const LOCAL_CACHE_KEY = 'stockManagerState_v1';
   function readLocalCache(){
@@ -385,11 +449,12 @@
         fxRecords: f ? JSON.parse(f.value) : [],
       };
     }
-    if(GITHUB_TOKEN){
+    const githubToken = getGithubToken();
+    if(githubToken){
       try{
         const resp = await fetch(
           `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${GITHUB_DATA_PATH}?ref=${GITHUB_BRANCH}`,
-          { headers:{ 'Accept':'application/vnd.github+json', 'Authorization':`Bearer ${GITHUB_TOKEN}` } }
+          { headers:{ 'Accept':'application/vnd.github+json', 'Authorization':`Bearer ${githubToken}` } }
         );
         if(resp.status === 404){
           githubFileSha = null;
@@ -422,7 +487,7 @@
     banner.style.margin = '14px 20px 0';
     if(kind === 'setup'){
       banner.className = 'msg info';
-      banner.innerHTML = `여러 브라우저·기기에서 같은 데이터를 보려면 GitHub 저장소를 공유 저장소로 연결하세요: index.html 안의 <code>const GITHUB_TOKEN = '';</code>에 GitHub Fine-grained 개인 액세스 토큰(이 저장소 한정, Contents 읽기/쓰기 권한)을 붙여넣고 재커밋하시면 됩니다. 그 전까지는 이 브라우저에만 저장됩니다.
+      banner.innerHTML = `여러 브라우저·기기에서 같은 데이터를 보려면 상단의 <b>⚙ 동기화 설정</b> 버튼을 눌러 GitHub Fine-grained 개인 액세스 토큰(이 저장소 한정, Contents 읽기/쓰기 권한)을 입력하세요. 토큰은 이 브라우저에만 저장되며 코드에는 남지 않습니다. 그 전까지는 이 브라우저에만 저장됩니다.
         <span id="dismissSyncBanner" style="float:right;cursor:pointer;color:var(--text-dim);">닫기</span>`;
       const dismiss = () => { const b = document.getElementById('syncSetupBanner'); if(b) b.remove(); sessionStorage.setItem('syncBannerDismissed','1'); };
       setTimeout(() => { const el = document.getElementById('dismissSyncBanner'); if(el) el.addEventListener('click', dismiss); }, 0);
@@ -447,7 +512,8 @@
       }catch(e){ console.error('save failed', e); }
       return;
     }
-    if(GITHUB_TOKEN){
+    const githubTokenForSave = getGithubToken();
+    if(githubTokenForSave){
       try{
         const body = {
           message: 'update stock manager data',
@@ -459,7 +525,7 @@
           `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${GITHUB_DATA_PATH}`,
           {
             method:'PUT',
-            headers:{ 'Accept':'application/vnd.github+json', 'Authorization':`Bearer ${GITHUB_TOKEN}`, 'Content-Type':'application/json' },
+            headers:{ 'Accept':'application/vnd.github+json', 'Authorization':`Bearer ${githubTokenForSave}`, 'Content-Type':'application/json' },
             body: JSON.stringify(body)
           }
         );
