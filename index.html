@@ -333,13 +333,21 @@
   })();
 
   // ---------------- persistence ----------------
-  // Claude 미리보기 안에서는 window.storage(계정별 저장)를 그대로 사용하고,
-  // GitHub Pages 등 실제 배포 환경에서는 jsonblob.com에 만든 공유 저장소 하나를
-  // 모든 브라우저/기기가 함께 읽고 쓰도록 합니다. (localStorage는 오프라인 캐시 겸 최후 폴백)
+  // Claude 미리보기 안에서는 window.storage(계정별 저장)를 그대로 사용합니다.
+  // GitHub Pages 등 실제 배포 환경에서는 jsonblob.com 같은 외부 무료 서비스가 브라우저 CORS를
+  // 막아서(직접 확인함) 쓸 수 없었고, 대신 "이미 갖고 계신 이 GitHub 저장소 자체"를 저장소로 씁니다.
+  // GitHub REST API는 브라우저 CORS를 공식 지원하므로 프록시 없이 바로 호출 가능합니다.
   const hasClaudeStorage = (typeof window.storage !== 'undefined' && window.storage && typeof window.storage.get === 'function');
 
-  // ↓↓↓ 최초 1회 설정한 뒤에는 비워두지 마세요. 설정 방법은 화면에 뜨는 안내 배너를 참고하세요. ↓↓↓
-  const SHARED_BLOB_ID = '';
+  // ↓↓↓ 아래 4개를 본인 값으로 채우세요 ↓↓↓
+  const GITHUB_OWNER = 'tpfks9505-ux';      // GitHub 계정명
+  const GITHUB_REPO = 'yoontest2';          // 저장소 이름
+  const GITHUB_BRANCH = 'main';             // 브랜치명 (보통 main)
+  // Settings → Developer settings → Personal access tokens → Fine-grained tokens 에서
+  // "이 저장소(yoontest2)"만 선택하고 Repository permissions → Contents: Read and write 권한만 준
+  // 토큰을 만들어 여기에 붙여넣으세요. (다른 저장소/계정 설정에는 접근 못 하도록 반드시 이 저장소로 한정)
+  const GITHUB_TOKEN = '';
+  const GITHUB_DATA_PATH = 'data/store.json';
 
   const LOCAL_CACHE_KEY = 'stockManagerState_v1';
   function readLocalCache(){
@@ -348,6 +356,21 @@
   function writeLocalCache(state){
     try{ localStorage.setItem(LOCAL_CACHE_KEY, JSON.stringify(state)); }catch(e){}
   }
+
+  // 한글이 포함된 JSON을 안전하게 base64 인코딩/디코딩하기 위한 유틸
+  function b64EncodeUnicode(str){
+    const bytes = new TextEncoder().encode(str);
+    let bin = '';
+    bytes.forEach(b => bin += String.fromCharCode(b));
+    return btoa(bin);
+  }
+  function b64DecodeUnicode(b64){
+    const bin = atob(b64.replace(/\n/g, ''));
+    const bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
+    return new TextDecoder('utf-8').decode(bytes);
+  }
+
+  let githubFileSha = null; // 파일 업데이트(PUT) 시 필요
 
   async function loadState(){
     if(hasClaudeStorage){
@@ -362,56 +385,50 @@
         fxRecords: f ? JSON.parse(f.value) : [],
       };
     }
-    if(SHARED_BLOB_ID){
+    if(GITHUB_TOKEN){
       try{
-        const resp = await fetch(`https://jsonblob.com/api/jsonBlob/${SHARED_BLOB_ID}`, { headers:{ 'Accept':'application/json' } });
+        const resp = await fetch(
+          `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${GITHUB_DATA_PATH}?ref=${GITHUB_BRANCH}`,
+          { headers:{ 'Accept':'application/vnd.github+json', 'Authorization':`Bearer ${GITHUB_TOKEN}` } }
+        );
+        if(resp.status === 404){
+          githubFileSha = null;
+          const cached = readLocalCache();
+          return cached || { holdings:[], watchlist:{}, fxRecords:[] };
+        }
         if(!resp.ok) throw new Error('HTTP ' + resp.status);
-        const data = await resp.json();
+        const meta = await resp.json();
+        githubFileSha = meta.sha;
+        const data = JSON.parse(b64DecodeUnicode(meta.content));
         const state = { holdings: data.holdings||[], watchlist: data.watchlist||{}, fxRecords: data.fxRecords||[] };
         writeLocalCache(state);
         return state;
       }catch(e){
-        console.error('공유 저장소 읽기 실패', e);
-        showSyncBanner('error', '공유 저장소 읽기 실패: ' + String(e && e.message || e));
+        console.error('GitHub 저장소 읽기 실패', e);
+        showSyncBanner('error', 'GitHub에서 데이터를 불러오지 못했습니다: ' + String(e && e.message || e));
         return readLocalCache() || { holdings:[], watchlist:{}, fxRecords:[] };
       }
     }
+    showSyncBanner('setup');
     return readLocalCache() || { holdings:[], watchlist:{}, fxRecords:[] };
   }
 
-  let sharedStoreBootstrapped = false;
-  async function bootstrapSharedStore(){
-    if(hasClaudeStorage || SHARED_BLOB_ID || sharedStoreBootstrapped) return;
-    sharedStoreBootstrapped = true;
-    const localState = readLocalCache() || { holdings:[], watchlist:{}, fxRecords:[] };
-    try{
-      const resp = await fetch('https://jsonblob.com/api/jsonBlob', {
-        method:'POST',
-        headers:{ 'Content-Type':'application/json', 'Accept':'application/json' },
-        body: JSON.stringify(localState)
-      });
-      if(!resp.ok) throw new Error('생성 요청이 실패했습니다 (HTTP ' + resp.status + ')');
-      const loc = resp.headers.get('Location') || '';
-      const id = loc.split('/').filter(Boolean).pop();
-      if(!id) throw new Error('응답에서 저장소 ID를 찾지 못했습니다.');
-      showSyncBanner('ok', id);
-    }catch(e){
-      console.error('공유 저장소 생성 실패:', e);
-      showSyncBanner('error', String(e && e.message || e));
-    }
-  }
-
   function showSyncBanner(kind, payload){
-    if(document.getElementById('syncSetupBanner')) return;
+    if(kind === 'setup' && sessionStorage.getItem('syncBannerDismissed') === '1') return;
+    const old = document.getElementById('syncSetupBanner');
+    if(old) old.remove();
     const banner = document.createElement('div');
     banner.id = 'syncSetupBanner';
     banner.style.margin = '14px 20px 0';
-    if(kind === 'ok'){
+    if(kind === 'setup'){
       banner.className = 'msg info';
-      banner.innerHTML = `여러 브라우저·기기에서 같은 데이터를 보려면, index.html의 <code>const SHARED_BLOB_ID = '';</code> 부분을 아래 ID로 바꾸고 다시 커밋하세요:<br><b style="user-select:all;">${payload}</b><br>그 전까지 지금 이 브라우저에는 계속 로컬로 저장됩니다.`;
+      banner.innerHTML = `여러 브라우저·기기에서 같은 데이터를 보려면 GitHub 저장소를 공유 저장소로 연결하세요: index.html 안의 <code>const GITHUB_TOKEN = '';</code>에 GitHub Fine-grained 개인 액세스 토큰(이 저장소 한정, Contents 읽기/쓰기 권한)을 붙여넣고 재커밋하시면 됩니다. 그 전까지는 이 브라우저에만 저장됩니다.
+        <span id="dismissSyncBanner" style="float:right;cursor:pointer;color:var(--text-dim);">닫기</span>`;
+      const dismiss = () => { const b = document.getElementById('syncSetupBanner'); if(b) b.remove(); sessionStorage.setItem('syncBannerDismissed','1'); };
+      setTimeout(() => { const el = document.getElementById('dismissSyncBanner'); if(el) el.addEventListener('click', dismiss); }, 0);
     }else{
       banner.className = 'msg error';
-      banner.innerHTML = `공유 저장소 자동 생성에 실패했습니다 (${escapeHtml(payload)}). 지금은 이 브라우저에만 데이터가 저장됩니다. 브라우저 개발자도구(F12) → Console/Network 탭에 뜨는 에러 메시지를 확인해 알려주세요.`;
+      banner.innerHTML = escapeHtml(payload);
     }
     const header = document.querySelector('header.top');
     if(header) header.after(banner);
@@ -430,21 +447,35 @@
       }catch(e){ console.error('save failed', e); }
       return;
     }
-    if(SHARED_BLOB_ID){
+    if(GITHUB_TOKEN){
       try{
-        const resp = await fetch(`https://jsonblob.com/api/jsonBlob/${SHARED_BLOB_ID}`, {
-          method:'PUT',
-          headers:{ 'Content-Type':'application/json' },
-          body: JSON.stringify(state)
-        });
-        if(!resp.ok) throw new Error('HTTP ' + resp.status);
+        const body = {
+          message: 'update stock manager data',
+          content: b64EncodeUnicode(JSON.stringify(state, null, 2)),
+          branch: GITHUB_BRANCH,
+        };
+        if(githubFileSha) body.sha = githubFileSha;
+        const resp = await fetch(
+          `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${GITHUB_DATA_PATH}`,
+          {
+            method:'PUT',
+            headers:{ 'Accept':'application/vnd.github+json', 'Authorization':`Bearer ${GITHUB_TOKEN}`, 'Content-Type':'application/json' },
+            body: JSON.stringify(body)
+          }
+        );
+        if(!resp.ok){
+          const errText = await resp.text().catch(()=>'');
+          throw new Error('HTTP ' + resp.status + ' ' + errText.slice(0,200));
+        }
+        const result = await resp.json();
+        githubFileSha = result.content && result.content.sha;
       }catch(e){
-        console.error('공유 저장소 저장 실패', e);
-        showSyncBanner('error', '데이터 동기화 저장 실패: ' + String(e && e.message || e));
+        console.error('GitHub 저장 실패', e);
+        showSyncBanner('error', 'GitHub에 데이터를 저장하지 못했습니다: ' + String(e && e.message || e));
       }
       return;
     }
-    await bootstrapSharedStore();
+    showSyncBanner('setup');
   }
 
   let holdings = [];
@@ -1153,7 +1184,6 @@
     watchlist = initialState.watchlist;
     fxRecords = initialState.fxRecords;
 
-    bootstrapSharedStore(); // 데이터 추가 여부와 상관없이 접속하자마자 공유 저장소를 만들어 안내 배너를 띄움
 
     renderHoldings(); renderSummary(); renderTape(); renderWatchlist(); renderFx();
 
